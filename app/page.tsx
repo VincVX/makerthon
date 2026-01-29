@@ -1,7 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
-import { processDxf } from "@/components/dxf";
+import { useCallback, useMemo, useState } from "react";
 import { BoxInputs } from "@/components/BoxInputs";
 import { DxfProvider, type DxfMode } from "@/components/DxfContext";
 import { FormatHeader } from "@/components/FormatHeader";
@@ -19,8 +18,7 @@ export default function Home() {
   const [mode, setMode] = useState<DxfMode>("preset");
   const [dxfText, setDxfText] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
-
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [autoFillKey, setAutoFillKey] = useState<string | null>(null);
 
   const dims = useMemo(
     () =>
@@ -35,20 +33,16 @@ export default function Home() {
     [length, width, height, thickness, lidOverlap, glueTab]
   );
 
-  const handleDownload = () => {
-    if (!svgRef.current) return;
-    const serializer = new XMLSerializer();
-    const svgText = serializer.serializeToString(svgRef.current);
-    const blob = new Blob([svgText], { type: "image/svg+xml" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "box-net.svg";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
+  const handleDxfBounds = useCallback(
+    (bounds: { width: number; height: number } | null) => {
+      if (!bounds || !fileName) return;
+      if (autoFillKey === fileName) return;
+      setLength(Math.round(bounds.width));
+      setWidth(Math.round(bounds.height));
+      setAutoFillKey(fileName);
+    },
+    [autoFillKey, fileName]
+  );
 
   const handleFileUpload = (file: File | null) => {
     if (!file) return;
@@ -56,16 +50,8 @@ export default function Home() {
     reader.onload = () => {
       const text = typeof reader.result === "string" ? reader.result : null;
       setDxfText(text);
-      if (text) {
-        try {
-          const processed = processDxf(text);
-          setLength(Math.round(processed.bounds.width));
-          setWidth(Math.round(processed.bounds.height));
-        } catch {
-          // ignore parse errors
-        }
-      }
       setFileName(file.name);
+      setAutoFillKey(null);
       setMode("upload");
     };
     reader.readAsText(file);
@@ -74,6 +60,7 @@ export default function Home() {
   const handleClearUpload = () => {
     setDxfText(null);
     setFileName(null);
+    setAutoFillKey(null);
     setMode("preset");
   };
 
@@ -119,7 +106,7 @@ export default function Home() {
 
           <section className="flex w-full flex-1 flex-col gap-6">
             <ThreePreview dims={dims} />
-            <TechnicalDrawing dims={dims} svgRef={svgRef} onDownload={handleDownload} />
+            <TechnicalDrawing dims={dims} onDxfBounds={handleDxfBounds} />
           </section>
         </main>
       </div>

@@ -133,6 +133,19 @@ const buildCirclePath = (cx: number, cy: number, r: number) =>
   `M ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy}`;
 
 const degToRad = (deg: number) => (deg * Math.PI) / 180;
+const radToDeg = (rad: number) => (rad * 180) / Math.PI;
+
+const getArcAngleUnit = (entities: any[]) => {
+  let maxAbs = 0;
+  entities.forEach((entity) => {
+    if (entity?.type !== "ARC") return;
+    const start = entity.startAngle ?? 0;
+    const end = entity.endAngle ?? 0;
+    maxAbs = Math.max(maxAbs, Math.abs(start), Math.abs(end));
+  });
+  if (maxAbs === 0) return "deg";
+  return maxAbs <= Math.PI * 2 + 1e-4 ? "rad" : "deg";
+};
 
 const buildEllipsePoints = (
   cx: number,
@@ -172,10 +185,11 @@ const bulgeToArcPoints = (
   const chord = Math.hypot(p2.x - p1.x, p2.y - p1.y);
   if (chord === 0) return [p1];
   const radius = chord / (2 * Math.sin(theta / 2));
+  const radiusAbs = Math.abs(radius);
   const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
   const dir = { x: (p2.x - p1.x) / chord, y: (p2.y - p1.y) / chord };
   const perp = { x: -dir.y, y: dir.x };
-  const offset = Math.cos(theta / 2) * radius;
+  const offset = Math.cos(theta / 2) * radiusAbs;
   const center = {
     x: mid.x + perp.x * offset * Math.sign(bulge),
     y: mid.y + perp.y * offset * Math.sign(bulge),
@@ -187,8 +201,8 @@ const bulgeToArcPoints = (
   for (let i = 0; i <= steps; i += 1) {
     const t = startAngle + (theta * i) / steps;
     pts.push({
-      x: center.x + radius * Math.cos(t),
-      y: center.y + radius * Math.sin(t),
+      x: center.x + radiusAbs * Math.cos(t),
+      y: center.y + radiusAbs * Math.sin(t),
     });
   }
   return pts;
@@ -211,7 +225,34 @@ const applyTransform = (
   };
 };
 
-const explodeInsert = (entity: any, blocks: any, unitScale: number): DxfEntity[] => {
+const buildArcPoints = (
+  center: { x: number; y: number },
+  radius: number,
+  startAngle: number,
+  endAngle: number,
+  segments = 24
+) => {
+  let span = endAngle - startAngle;
+  if (span <= 0) span += 360;
+  const steps = Math.max(6, Math.round((Math.abs(span) / 360) * segments));
+  const pts: { x: number; y: number }[] = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const deg = startAngle + (span * i) / steps;
+    const rad = degToRad(deg);
+    pts.push({
+      x: center.x + radius * Math.cos(rad),
+      y: center.y + radius * Math.sin(rad),
+    });
+  }
+  return pts;
+};
+
+const explodeInsert = (
+  entity: any,
+  blocks: any,
+  unitScale: number,
+  arcAngleUnit: "deg" | "rad"
+): DxfEntity[] => {
   const name = entity.name || entity.block || entity.blockName;
   const block = blocks?.[name];
   if (!block?.entities) return [];
@@ -248,6 +289,31 @@ const explodeInsert = (entity: any, blocks: any, unitScale: number): DxfEntity[]
 
     if (child.type === "CIRCLE") {
       if (!child.center || !child.radius) return;
+      if (scale.x !== scale.y) {
+        const rawPts = buildEllipsePoints(
+          child.center.x,
+          child.center.y,
+          child.radius,
+          0,
+          1,
+          0,
+          Math.PI * 2
+        );
+        const transformed = rawPts.map((pt) =>
+          applyTransform(pt, insertion, scale, rotation)
+        );
+        entities.push({
+          type: "ELLIPSE",
+          layer,
+          lineType,
+          color,
+          points: transformed.map((pt) => ({
+            x: pt.x * unitScale,
+            y: pt.y * unitScale,
+          })),
+        });
+        return;
+      }
       const center = applyTransform(child.center, insertion, scale, rotation);
       entities.push({
         type: "CIRCLE",
@@ -256,7 +322,119 @@ const explodeInsert = (entity: any, blocks: any, unitScale: number): DxfEntity[]
         color,
         cx: center.x * unitScale,
         cy: center.y * unitScale,
-        r: child.radius * unitScale,
+        r: child.radius * scale.x * unitScale,
+      });
+    }
+
+    if (child.type === "ARC") {
+      if (!child.center || !child.radius) return;
+      const start = arcAngleUnit === "rad" ? radToDeg(child.startAngle ?? 0) : child.startAngle ?? 0;
+      const end = arcAngleUnit === "rad" ? radToDeg(child.endAngle ?? 0) : child.endAngle ?? 0;
+      const arcPts = buildArcPoints(
+        child.center,
+        child.radius,
+        start,
+        end,
+        32
+      ).map((pt) => applyTransform(pt, insertion, scale, rotation));
+      entities.push({
+        type: "POLYLINE",
+        layer,
+        lineType,
+        color,
+        points: arcPts.map((pt) => ({
+          x: pt.x * unitScale,
+          y: pt.y * unitScale,
+        })),
+        closed: false,
+      });
+    }
+
+    if (child.type === "LWPOLYLINE" || child.type === "POLYLINE") {
+      const raw = child.vertices || child.points || [];
+      const vertices = raw.map((pt: any) => ({
+        x: pt.x,
+        y: pt.y,
+        bulge: pt.bulge || 0,
+      }));
+      if (!vertices.length) return;
+      const points: { x: number; y: number }[] = [];
+      for (let i = 0; i < vertices.length - 1; i += 1) {
+        const p1 = vertices[i];
+        const p2 = vertices[i + 1];
+        const arcPts = bulgeToArcPoints(p1, p2, p1.bulge || 0, 16);
+        if (i > 0) arcPts.shift();
+        points.push(...arcPts);
+      }
+      if (child.closed) {
+        const p1 = vertices[vertices.length - 1];
+        const p2 = vertices[0];
+        const arcPts = bulgeToArcPoints(p1, p2, p1.bulge || 0, 16);
+        arcPts.shift();
+        points.push(...arcPts);
+      } else {
+        const last = vertices[vertices.length - 1];
+        points.push({ x: last.x, y: last.y });
+      }
+      const transformed = points.map((pt) =>
+        applyTransform(pt, insertion, scale, rotation)
+      );
+      entities.push({
+        type: "POLYLINE",
+        layer,
+        lineType,
+        color,
+        points: transformed.map((pt) => ({
+          x: pt.x * unitScale,
+          y: pt.y * unitScale,
+        })),
+        closed: Boolean(child.closed),
+      });
+    }
+
+    if (child.type === "ELLIPSE") {
+      const center = child.center;
+      const major = child.majorAxisEnd || child.majorAxis;
+      if (!center || !major) return;
+      const rawPts = buildEllipsePoints(
+        center.x,
+        center.y,
+        major.x,
+        major.y,
+        child.axisRatio ?? 1,
+        child.startAngle ?? 0,
+        child.endAngle ?? Math.PI * 2
+      );
+      const transformed = rawPts.map((pt) =>
+        applyTransform(pt, insertion, scale, rotation)
+      );
+      entities.push({
+        type: "ELLIPSE",
+        layer,
+        lineType,
+        color,
+        points: transformed.map((pt) => ({
+          x: pt.x * unitScale,
+          y: pt.y * unitScale,
+        })),
+      });
+    }
+
+    if (child.type === "SPLINE") {
+      const raw = child.fitPoints || child.controlPoints || [];
+      if (!raw.length) return;
+      const transformed = raw.map((pt: any) =>
+        applyTransform(pt, insertion, scale, rotation)
+      );
+      entities.push({
+        type: "SPLINE",
+        layer,
+        lineType,
+        color,
+        points: transformed.map((pt) => ({
+          x: pt.x * unitScale,
+          y: pt.y * unitScale,
+        })),
       });
     }
   });
@@ -268,6 +446,7 @@ export const parseDxfToEntities = (text: string): DxfEntity[] => {
   const parser = new DxfParser();
   const data = parser.parseSync(text);
   const unitScale = getUnitScale(data.header?.$INSUNITS);
+  const arcAngleUnit = getArcAngleUnit(data.entities || []);
   const entities: DxfEntity[] = [];
 
   data.entities?.forEach((entity: any) => {
@@ -276,7 +455,7 @@ export const parseDxfToEntities = (text: string): DxfEntity[] => {
     const color = entity.color || entity.colorIndex;
 
     if (entity.type === "INSERT") {
-      entities.push(...explodeInsert(entity, data.blocks, unitScale));
+      entities.push(...explodeInsert(entity, data.blocks, unitScale, arcAngleUnit));
       return;
     }
 
@@ -311,6 +490,14 @@ export const parseDxfToEntities = (text: string): DxfEntity[] => {
 
     if (entity.type === "ARC") {
       if (!entity.center || !entity.radius) return;
+      const start =
+        arcAngleUnit === "rad"
+          ? radToDeg(entity.startAngle ?? 0)
+          : entity.startAngle ?? 0;
+      const end =
+        arcAngleUnit === "rad"
+          ? radToDeg(entity.endAngle ?? 0)
+          : entity.endAngle ?? 0;
       entities.push({
         type: "ARC",
         layer,
@@ -319,8 +506,8 @@ export const parseDxfToEntities = (text: string): DxfEntity[] => {
         cx: entity.center.x * unitScale,
         cy: entity.center.y * unitScale,
         r: entity.radius * unitScale,
-        start: entity.startAngle ?? 0,
-        end: entity.endAngle ?? 0,
+        start,
+        end,
       });
     }
 
@@ -501,7 +688,7 @@ export const buildPathsFromEntities = (entities: DxfEntity[]): DxfPaths => {
       const ex = normalizeX(entity.cx + entity.r * Math.cos(endRad));
       const ey = normalizeY(entity.cy + entity.r * Math.sin(endRad));
       const largeArc = ((entity.end - entity.start + 360) % 360) > 180 ? 1 : 0;
-      const sweep = 0;
+      const sweep = 1;
       const arcPath = `M ${sx} ${sy} A ${entity.r} ${entity.r} 0 ${largeArc} ${sweep} ${ex} ${ey}`;
       if (perf) perfSegments.push(arcPath);
       else if (crease) creaseSegments.push(arcPath);

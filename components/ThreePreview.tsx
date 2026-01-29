@@ -2,9 +2,8 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDxfContext } from "./DxfContext";
-import { processDxf } from "./dxf";
 import type { BoxDimensions } from "./types";
 
 export function ThreePreview({ dims }: { dims: BoxDimensions }) {
@@ -21,14 +20,7 @@ export function ThreePreview({ dims }: { dims: BoxDimensions }) {
     controls: OrbitControls;
   } | null>(null);
 
-  const dxfSize = useMemo(() => {
-    if (mode !== "upload" || !dxfText) return null;
-    try {
-      return processDxf(dxfText).bounds;
-    } catch {
-      return null;
-    }
-  }, [dxfText, mode]);
+  const isUpload = mode === "upload" && Boolean(dxfText);
 
   useEffect(() => {
     if (!previewRef.current) return;
@@ -124,7 +116,7 @@ export function ThreePreview({ dims }: { dims: BoxDimensions }) {
 
   useEffect(() => {
     if (!threeRef.current) return;
-    const modelDims = dxfSize && mode === "upload"
+    const modelDims = isUpload
       ? {
           x: dims.L,
           y: dims.H,
@@ -140,7 +132,7 @@ export function ThreePreview({ dims }: { dims: BoxDimensions }) {
     const scaleY = modelDims.y / maxDim;
     const scaleZ = modelDims.z / maxDim;
     threeRef.current.mesh.scale.set(scaleX, scaleY, scaleZ);
-  }, [dims.panelL, dims.panelW, dims.panelH, dims.L, dims.W, dims.H, dxfSize, mode]);
+  }, [dims.panelL, dims.panelW, dims.panelH, dims.L, dims.W, dims.H, isUpload]);
 
   return (
     <div className="rounded-3xl border border-zinc-200/70 bg-white/80 p-6 shadow-[0_20px_60px_rgba(18,18,18,0.08)] backdrop-blur">
